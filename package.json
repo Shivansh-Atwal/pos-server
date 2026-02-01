@@ -23,7 +23,7 @@
     "bcryptjs": "^2.4.3",
     "connect-redis": "^7.1.0",
     "cors": "^2.8.5",
-    "dotenv": "^16.3.1",
+    "dotenv": "^16.6.1",
     "express": "^4.22.1",
     "express-session": "^1.17.3",
     "express-validator": "^7.0.0",

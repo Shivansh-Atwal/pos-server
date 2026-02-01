@@ -1,15 +1,24 @@
-import redis from 'redis'
+import { createClient } from 'redis'
 
-// Initialize Redis client
-const redisClient = redis.createClient({
-  host: process.env.REDIS_HOST || 'localhost',
-  port: process.env.REDIS_PORT || 6379,
-  password: process.env.REDIS_PASSWORD || undefined,
-  db: process.env.REDIS_DB || 0,
-})
+let redisClient
+
+if (process.env.REDIS_URL) {
+  // ✅ Production (Render / Cloud Redis)
+  redisClient = createClient({
+    url: process.env.REDIS_URL,
+  })
+} else {
+  // ✅ Local Redis
+  redisClient = createClient({
+    socket: {
+      host: process.env.REDIS_HOST || '127.0.0.1',
+      port: process.env.REDIS_PORT || 6379,
+    },
+  })
+}
 
 redisClient.on('error', (err) => {
-  console.error('Redis Client Error:', err)
+  console.error('Redis Client Error:', err.message)
 })
 
 redisClient.on('connect', () => {
@@ -20,10 +29,16 @@ redisClient.on('ready', () => {
   console.log('✓ Redis Client Ready')
 })
 
-// Connect to Redis
-await redisClient.connect().catch((err) => {
-  console.error('Failed to connect to Redis:', err)
-  process.exit(1)
-})
+if (process.env.REDIS_ENABLED === 'true') {
+  try {
+    console.log(
+      'Redis Mode:',
+      process.env.REDIS_URL ? 'CLOUD' : 'LOCAL'
+    )
+    await redisClient.connect()
+  } catch (err) {
+    console.error('Failed to connect to Redis:', err.message)
+  }
+}
 
 export default redisClient

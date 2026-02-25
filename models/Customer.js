@@ -18,11 +18,6 @@ const customerSchema = new mongoose.Schema(
       trim: true,
       match: /^(\+\d{1,3}[- ]?)?\d{10}$/,
     },
-    email: {
-      type: String,
-      trim: true,
-      lowercase: true,
-    },
     address: {
       type: String,
       trim: true,

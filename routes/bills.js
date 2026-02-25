@@ -4,6 +4,7 @@ import Product from '../models/Product.js'
 import { verifyToken } from './auth.js'
 import * as billService from '../services/billService.js'
 import * as whatsappService from '../services/whatsappService.js'
+import redisClient from "../config/redis.js"
 
 const router = express.Router()
 
@@ -41,7 +42,6 @@ router.post('/', verifyToken, async (req, res) => {
       // Customer details
       customerName,
       customerMobile,
-      customerEmail,
     } = req.body
 
     if (!items || items.length === 0) {
@@ -77,7 +77,6 @@ router.post('/', verifyToken, async (req, res) => {
       // Customer details
       customerName,
       customerMobile,
-      customerEmail,
     })
 
     await bill.save()
@@ -264,7 +263,7 @@ router.get('/:id', verifyToken, async (req, res) => {
  */
 router.put('/:id', verifyToken, async (req, res) => {
   try {
-    const { notes, customerName, customerMobile, customerEmail } = req.body
+    const { notes, customerName, customerMobile} = req.body
 
     const bill = await Bill.findOne({ _id: req.params.id, userId: req.user.id })
 
@@ -276,7 +275,6 @@ router.put('/:id', verifyToken, async (req, res) => {
     if (notes) bill.notes = notes
     if (customerName) bill.customerName = customerName
     if (customerMobile) bill.customerMobile = customerMobile
-    if (customerEmail) bill.customerEmail = customerEmail
 
     await bill.save()
 
@@ -595,20 +593,68 @@ router.get('/export/csv', verifyToken, async (req, res) => {
  * @desc    Send bill via WhatsApp
  * @access  Private
  */
-router.post('/send-whatsapp', verifyToken, async (req, res) => {
+router.post("/send-whatsapp", async (req, res) => {
   try {
-    const { billId, phoneNumber, pdfBase64 } = req.body
+
+    const { phoneNumber, pdfBase64 } = req.body
 
     if (!phoneNumber || !pdfBase64) {
-      return res.status(400).json({ error: 'Phone number and PDF are required' })
+      return res.status(400).json({
+        error: "Phone number and PDF required"
+      })
     }
 
-    const result = await whatsappService.sendBillViaWhatsApp(phoneNumber, pdfBase64, 'bill.pdf')
+    // Step 1: Save number in Redis
+    await redisClient.setEx(
+      `customer:${phoneNumber}`,
+      60 * 60 * 24 * 30,
+      phoneNumber
+    )
 
-    res.json(result)
+    console.log("Saved in Redis:", phoneNumber)
+
+
+    // Step 2: Send WhatsApp using WhatsApp Cloud API
+    const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN
+    const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID
+
+    const response = await fetch(
+      `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${WHATSAPP_TOKEN}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          messaging_product: "whatsapp",
+          to: phoneNumber,
+          type: "document",
+          document: {
+            link: pdfBase64,
+            filename: "bill.pdf"
+          }
+        })
+      }
+    )
+
+    const result = await response.json()
+
+    console.log(result)
+
+    res.json({
+      success: true,
+      message: "WhatsApp sent",
+      redisSaved: true
+    })
+
   } catch (error) {
-    console.error('Error sending bill via WhatsApp:', error)
-    res.status(500).json({ error: error.message || 'Failed to send bill via WhatsApp' })
+
+    console.error(error)
+
+    res.status(500).json({
+      error: error.message
+    })
   }
 })
 

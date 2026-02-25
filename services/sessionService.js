@@ -8,6 +8,7 @@ const SESSION_EXPIRY = 7 * 24 * 60 * 60 // 7 days in seconds
 export const createSession = async (userId, userData) => {
   try {
     const sessionId = `session:${userId}:${Date.now()}`
+
     const sessionData = {
       userId,
       username: userData.username,
@@ -21,7 +22,7 @@ export const createSession = async (userId, userData) => {
       lastActive: new Date().toISOString(),
     }
 
-    // Store session in Redis with expiry
+    // Store session in Redis
     await redisClient.setEx(
       sessionId,
       SESSION_EXPIRY,
@@ -36,6 +37,7 @@ export const createSession = async (userId, userData) => {
     )
 
     console.log(`✓ Session created: ${sessionId}`)
+
     return {
       sessionId,
       ...sessionData,
@@ -52,9 +54,9 @@ export const createSession = async (userId, userData) => {
 export const getSession = async (sessionId) => {
   try {
     const sessionData = await redisClient.get(sessionId)
-    if (!sessionData) {
-      return null
-    }
+
+    if (!sessionData) return null
+
     return JSON.parse(sessionData)
   } catch (err) {
     console.error('Error getting session:', err)
@@ -68,9 +70,9 @@ export const getSession = async (sessionId) => {
 export const getUserSession = async (userId) => {
   try {
     const sessionId = await redisClient.get(`user:${userId}:session`)
-    if (!sessionId) {
-      return null
-    }
+
+    if (!sessionId) return null
+
     return await getSession(sessionId)
   } catch (err) {
     console.error('Error getting user session:', err)
@@ -84,13 +86,11 @@ export const getUserSession = async (userId) => {
 export const updateSessionActivity = async (sessionId) => {
   try {
     const sessionData = await getSession(sessionId)
-    if (!sessionData) {
-      return null
-    }
+
+    if (!sessionData) return null
 
     sessionData.lastActive = new Date().toISOString()
 
-    // Update session in Redis
     await redisClient.setEx(
       sessionId,
       SESSION_EXPIRY,
@@ -105,13 +105,15 @@ export const updateSessionActivity = async (sessionId) => {
 }
 
 /**
- * Invalidate/destroy session
+ * Destroy session (logout)
  */
 export const destroySession = async (sessionId, userId) => {
   try {
     await redisClient.del(sessionId)
     await redisClient.del(`user:${userId}:session`)
+
     console.log(`✓ Session destroyed: ${sessionId}`)
+
     return true
   } catch (err) {
     console.error('Error destroying session:', err)
@@ -120,12 +122,18 @@ export const destroySession = async (sessionId, userId) => {
 }
 
 /**
- * Store temporary data in session (for barcode scanning, cart, etc.)
+ * Store temporary session data
  */
 export const setSessionData = async (userId, key, value, ttl = 3600) => {
   try {
     const dataKey = `session:data:${userId}:${key}`
-    await redisClient.setEx(dataKey, ttl, JSON.stringify(value))
+
+    await redisClient.setEx(
+      dataKey,
+      ttl,
+      JSON.stringify(value)
+    )
+
     return true
   } catch (err) {
     console.error('Error setting session data:', err)
@@ -134,15 +142,16 @@ export const setSessionData = async (userId, key, value, ttl = 3600) => {
 }
 
 /**
- * Get temporary data from session
+ * Get temporary session data
  */
 export const getSessionData = async (userId, key) => {
   try {
     const dataKey = `session:data:${userId}:${key}`
+
     const data = await redisClient.get(dataKey)
-    if (!data) {
-      return null
-    }
+
+    if (!data) return null
+
     return JSON.parse(data)
   } catch (err) {
     console.error('Error getting session data:', err)
@@ -151,12 +160,14 @@ export const getSessionData = async (userId, key) => {
 }
 
 /**
- * Clear temporary data from session
+ * Clear temporary session data
  */
 export const clearSessionData = async (userId, key) => {
   try {
     const dataKey = `session:data:${userId}:${key}`
+
     await redisClient.del(dataKey)
+
     return true
   } catch (err) {
     console.error('Error clearing session data:', err)
@@ -165,20 +176,23 @@ export const clearSessionData = async (userId, key) => {
 }
 
 /**
- * Get all active sessions for a user (for multi-device support)
+ * Get all sessions of a user (multi-device support)
  */
 export const getUserSessions = async (userId) => {
   try {
     const pattern = `session:${userId}:*`
+
     const keys = await redisClient.keys(pattern)
 
     const sessions = []
+
     for (const key of keys) {
-      const sessionData = await redisClient.get(key)
-      if (sessionData) {
+      const data = await redisClient.get(key)
+
+      if (data) {
         sessions.push({
           sessionId: key,
-          ...JSON.parse(sessionData),
+          ...JSON.parse(data),
         })
       }
     }
@@ -191,14 +205,16 @@ export const getUserSessions = async (userId) => {
 }
 
 /**
- * Clear all sessions for a user (logout from all devices)
+ * Clear all sessions for a user
  */
 export const clearUserSessions = async (userId) => {
   try {
     const sessions = await getUserSessions(userId)
+
     for (const session of sessions) {
       await destroySession(session.sessionId, userId)
     }
+
     return true
   } catch (err) {
     console.error('Error clearing user sessions:', err)

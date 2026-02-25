@@ -20,7 +20,6 @@ const billSchema = new mongoose.Schema(
     // Customer Details
     customerName: String,
     customerMobile: String,
-    customerEmail: String,
     // Bill Items
     items: [
       {

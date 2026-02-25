@@ -6,18 +6,31 @@ import * as cacheService from '../services/cacheService.js'
 const router = express.Router()
 
 /**
- * @route   GET /api/inventory
- * @desc    Get all inventory with optional filtering
- * @access  Public
+ * ======================================
+ * GET ALL INVENTORY (Redis fallback supported)
+ * ======================================
  */
 router.get('/', async (req, res) => {
   try {
+
     const { warehouse, status, search } = req.query
 
-    // Check cache if no filters applied
-    if (!warehouse && !status && !search) {
-      const cachedInventory = await cacheService.getCachedInventory()
-      if (cachedInventory) {
+    const useCache = !warehouse && !status && !search
+
+    // STEP 1: Try Redis fir
+    if (useCache) {
+
+      const cachedInventory =
+        await cacheService.getCachedInventoryList()
+
+      if (
+        cachedInventory &&
+        Array.isArray(cachedInventory) &&
+        cachedInventory.length > 0
+      ) {
+
+        console.log('✓ Inventory served from Redis')
+
         return res.json({
           success: true,
           count: cachedInventory.length,
@@ -25,148 +38,121 @@ router.get('/', async (req, res) => {
           cached: true,
         })
       }
+
+      console.log('⚠ Redis empty, fetching from MongoDB')
     }
+
+    // STEP 2: Fetch from MongoDB
 
     let query = {}
 
-    if (warehouse) {
+    if (warehouse)
       query.warehouse = warehouse
-    }
 
-    if (status) {
+    if (status)
       query.status = status
-    }
 
     if (search) {
-      // Search by product name or barcode
+
       const products = await Product.find({
         $or: [
           { name: { $regex: search, $options: 'i' } },
           { barcode: search },
         ],
       })
+
       const productIds = products.map(p => p._id)
-      query.$or = [{ productId: { $in: productIds } }, { barcode: search }]
+
+      query.$or = [
+        { productId: { $in: productIds } },
+        { barcode: search },
+      ]
     }
 
-    const inventory = await Inventory.find(query)
-      .populate('productId')
-      .sort({ warehouse: 1, location: 1 })
 
-    // Cache full inventory if no filters
-    if (!warehouse && !status && !search) {
-      await cacheService.cacheInventory(inventory)
+    const inventory =
+      await Inventory.find(query)
+        .populate('productId')
+        .sort({ warehouse: 1, location: 1 })
+
+    console.log(`✓ Inventory fetched from MongoDB (count: ${inventory.length})`)    
+
+    // STEP 3: Save to Redis if not empty
+
+    if (useCache && inventory.length > 0) {
+
+      await cacheService.cacheInventoryList(inventory)
+
+      console.log('✓ Inventory cached in Redis')
     }
+
+    // STEP 4: Return result
 
     res.json({
       success: true,
       count: inventory.length,
       data: inventory,
+      cached: false,
     })
+
+
   } catch (error) {
-    console.error('Error fetching inventory:', error)
-    res.status(500).json({ error: 'Failed to fetch inventory' })
+
+    console.error('Inventory fetch error:', error)
+
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch inventory',
+    })
   }
 })
 
-/**
- * @route   GET /api/inventory/low-stock
- * @desc    Get products with low stock
- * @access  Public
- */
-router.get('/low-stock', async (req, res) => {
+// ADD INVENTORY
+
+router.post('/', async (req, res) => {
   try {
-    const lowStock = await Inventory.find().populate('productId')
 
-    const filtered = lowStock.filter(
-      (item) => item.quantity <= item.minStock
-    )
+    const {
+      productId,
+      barcode,
+      quantity,
+      minStock,
+      location,
+      warehouse
+    } = req.body
 
-    res.json({
-      success: true,
-      count: filtered.length,
-      data: filtered,
-    })
-  } catch (error) {
-    console.error('Error fetching low stock items:', error)
-    res.status(500).json({ error: 'Failed to fetch low stock items' })
-  }
-})
-
-/**
- * @route   GET /api/inventory/barcode/:barcode
- * @desc    Get inventory by barcode
- * @access  Public
- */
-router.get('/barcode/:barcode', async (req, res) => {
-  try {
-    const { barcode } = req.params
-
-    const inventory = await Inventory.findOne({
-      barcode: barcode,
-    }).populate('productId')
-
-    if (!inventory) {
-      return res.status(404).json({
+    if (quantity === undefined) {
+      return res.status(400).json({
         success: false,
-        error: 'Inventory item not found by barcode',
+        error: 'Quantity is required',
       })
     }
 
-    res.json({
-      success: true,
-      data: inventory,
-    })
-  } catch (error) {
-    console.error('Error fetching inventory by barcode:', error)
-    res.status(500).json({ error: 'Failed to fetch inventory by barcode' })
-  }
-})
-
-/**
- * @route   POST /api/inventory
- * @desc    Add inventory for product
- * @access  Private (Admin only)
- */
-router.post('/', async (req, res) => {
-  try {
-    const { productId, barcode, quantity, minStock, location, warehouse } = req.body
-
-    if (!quantity) {
-      return res.status(400).json({ error: 'Quantity is required' })
-    }
-
-    // Check if product exists
-    let product = null
-    if (productId) {
-      product = await Product.findById(productId)
-      if (!product) {
-        return res.status(404).json({ error: 'Product not found' })
-      }
-    }
-
-    // Check if inventory already exists by barcode
     let inventory = null
-    if (barcode) {
+
+    if (barcode)
       inventory = await Inventory.findOne({ barcode })
-    } else if (productId) {
+
+    else if (productId)
       inventory = await Inventory.findOne({ productId })
-    }
+
 
     if (inventory) {
-      // Update existing inventory
+
       inventory.quantity += quantity
-      inventory.minStock = minStock || inventory.minStock
-      inventory.location = location || inventory.location
-      inventory.warehouse = warehouse || inventory.warehouse
+
+      if (minStock !== undefined)
+        inventory.minStock = minStock
+
+      if (location)
+        inventory.location = location
+
+      if (warehouse)
+        inventory.warehouse = warehouse
+
       inventory.lastRestocked = new Date()
+
     } else {
-      // Create new inventory
-      if (!productId && !barcode) {
-        return res.status(400).json({
-          error: 'Either productId or barcode is required for new inventory',
-        })
-      }
 
       inventory = new Inventory({
         productId,
@@ -178,323 +164,275 @@ router.post('/', async (req, res) => {
       })
     }
 
-    // Update status based on quantity
-    if (inventory.quantity === 0) {
-      inventory.status = 'Out of Stock'
-    } else if (inventory.quantity <= inventory.minStock) {
-      inventory.status = 'Low Stock'
-    } else {
-      inventory.status = 'In Stock'
-    }
 
-    // Update product stock if product exists
-    if (product) {
-      product.stock = inventory.quantity
-      product.barcode = barcode || product.barcode
-      await product.save()
-    }
+    // Update status
+    if (inventory.quantity === 0)
+      inventory.status = 'Out of Stock'
+
+    else if (inventory.quantity <= inventory.minStock)
+      inventory.status = 'Low Stock'
+
+    else
+      inventory.status = 'In Stock'
+
 
     await inventory.save()
+
+    // Update product stock
+    if (productId) {
+      await Product.findByIdAndUpdate(
+        productId,
+        { stock: inventory.quantity }
+      )
+    }
+
+    await cacheService.clearInventoryCache()
 
     res.status(201).json({
       success: true,
       data: inventory,
     })
+
   } catch (error) {
-    console.error('Error adding inventory:', error)
-    res.status(500).json({ error: 'Failed to add inventory' })
-  }
-})
 
-/**
- * @route   POST /api/inventory/register-barcode
- * @desc    Register new product with barcode and add to inventory
- * @access  Public
- */
-router.post('/register-barcode', async (req, res) => {
-  try {
-    const {
-      barcode,
-      name,
-      price,
-      category,
-      brand,
-      quantity,
-      location,
-      warehouse,
-    } = req.body
+    console.error(error)
 
-    if (!barcode || !name || !price || !category) {
-      return res.status(400).json({
-        error: 'Barcode, name, price, and category are required',
-      })
-    }
-
-    // Check if barcode already exists
-    let product = await Product.findOne({ barcode })
-    if (!product) {
-      // Create new product
-      product = new Product({
-        barcode,
-        name,
-        price,
-        category,
-        brand: brand || '',
-        stock: quantity || 0,
-      })
-      await product.save()
-    }
-
-    // Check if inventory exists
-    let inventory = await Inventory.findOne({ barcode })
-    if (inventory) {
-      // Update existing inventory
-      inventory.quantity += quantity || 0
-      inventory.location = location || inventory.location
-      inventory.warehouse = warehouse || inventory.warehouse
-      inventory.lastRestocked = new Date()
-    } else {
-      // Create new inventory
-      inventory = new Inventory({
-        productId: product._id,
-        barcode,
-        quantity: quantity || 0,
-        minStock: 10,
-        location: location || 'Main Store',
-        warehouse: warehouse || 'Default',
-      })
-    }
-
-    // Update status
-    if (inventory.quantity === 0) {
-      inventory.status = 'Out of Stock'
-    } else if (inventory.quantity <= inventory.minStock) {
-      inventory.status = 'Low Stock'
-    } else {
-      inventory.status = 'In Stock'
-    }
-
-    await inventory.save()
-
-    // Update product stock
-    product.stock = inventory.quantity
-    await product.save()
-
-    res.status(201).json({
-      success: true,
-      message: 'Product and inventory registered successfully',
-      data: {
-        product,
-        inventory,
-      },
+    res.status(500).json({
+      success: false,
+      error: 'Failed to add inventory',
     })
-  } catch (error) {
-    console.error('Error registering barcode:', error)
-    res.status(500).json({ error: 'Failed to register barcode' })
   }
 })
 
+
+
 /**
- * @route   PUT /api/inventory/:id
- * @desc    Update inventory
- * @access  Private (Admin only)
+ * ======================================
+ * UPDATE INVENTORY
+ * ======================================
  */
 router.put('/:id', async (req, res) => {
   try {
-    const { quantity, minStock, location, warehouse, notes } = req.body
 
-    const inventory = await Inventory.findByIdAndUpdate(
-      req.params.id,
-      {
-        quantity,
-        minStock,
-        location,
-        warehouse,
-        notes,
-        lastRestocked: new Date(),
-      },
-      { new: true }
-    ).populate('productId')
+    const inventory = await Inventory.findById(req.params.id)
 
     if (!inventory) {
-      return res.status(404).json({ error: 'Inventory not found' })
-    }
-
-    // Update status
-    if (inventory.quantity === 0) {
-      inventory.status = 'Out of Stock'
-    } else if (inventory.quantity <= inventory.minStock) {
-      inventory.status = 'Low Stock'
-    } else {
-      inventory.status = 'In Stock'
-    }
-
-    await inventory.save()
-
-    // Update product stock
-    const product = await Product.findById(inventory.productId)
-    if (product) {
-      product.stock = quantity
-      await product.save()
-    }
-
-    res.json({
-      success: true,
-      data: inventory,
-    })
-  } catch (error) {
-    console.error('Error updating inventory:', error)
-    res.status(500).json({ error: 'Failed to update inventory' })
-  }
-})
-
-/**
- * @route   PUT /api/inventory/:id/adjust-quantity
- * @desc    Adjust inventory quantity (add/remove)
- * @access  Public
- */
-router.put('/:id/adjust-quantity', async (req, res) => {
-  try {
-    const { quantity } = req.body
-
-    if (quantity === undefined) {
-      return res.status(400).json({ error: 'Quantity adjustment is required' })
-    }
-
-    const inventory = await Inventory.findById(req.params.id).populate('productId')
-
-    if (!inventory) {
-      return res.status(404).json({ error: 'Inventory not found' })
-    }
-
-    inventory.quantity += quantity
-    inventory.lastRestocked = new Date()
-
-    // Update status
-    if (inventory.quantity === 0) {
-      inventory.status = 'Out of Stock'
-    } else if (inventory.quantity <= inventory.minStock) {
-      inventory.status = 'Low Stock'
-    } else {
-      inventory.status = 'In Stock'
-    }
-
-    await inventory.save()
-
-    // Update product stock
-    const product = await Product.findById(inventory.productId)
-    if (product) {
-      product.stock = inventory.quantity
-      await product.save()
-    }
-
-    res.json({
-      success: true,
-      data: inventory,
-    })
-  } catch (error) {
-    console.error('Error adjusting inventory:', error)
-    res.status(500).json({ error: 'Failed to adjust inventory' })
-  }
-})
-
-/**
- * @route   POST /api/inventory/deduct-bill
- * @desc    Deduct inventory for all items in a completed bill
- * @access  Public
- */
-router.post('/deduct-bill', async (req, res) => {
-  try {
-    const { billItems } = req.body
-
-    if (!billItems || !Array.isArray(billItems) || billItems.length === 0) {
-      return res.status(400).json({
-        error: 'billItems array is required',
+      return res.status(404).json({
+        success: false,
+        error: 'Inventory not found',
       })
     }
 
-    const deductedItems = []
-    const errors = []
+    const {
+      quantity,
+      minStock,
+      location,
+      warehouse
+    } = req.body
 
-    // Process each item in the bill
-    for (const item of billItems) {
-      try {
-        const { barcode, id, quantity } = item
 
-        // Find inventory by barcode or productId
-        let inventory = null
-        if (barcode) {
-          inventory = await Inventory.findOne({ barcode })
-        } else if (id) {
-          inventory = await Inventory.findOne({ productId: id })
-        }
+    if (quantity !== undefined)
+      inventory.quantity = quantity
 
-        if (!inventory) {
-          errors.push({
-            product: item.name || barcode || id,
-            error: 'Inventory item not found',
-          })
-          continue
-        }
+    if (minStock !== undefined)
+      inventory.minStock = minStock
 
-        // Check if sufficient quantity exists
-        if (inventory.quantity < quantity) {
-          errors.push({
-            product: item.name || barcode || id,
-            error: `Insufficient quantity. Available: ${inventory.quantity}, Required: ${quantity}`,
-          })
-          continue
-        }
+    if (location)
+      inventory.location = location
 
-        // Deduct quantity
-        inventory.quantity -= quantity
+    if (warehouse)
+      inventory.warehouse = warehouse
 
-        // Update status based on new quantity
-        if (inventory.quantity === 0) {
-          inventory.status = 'Out of Stock'
-        } else if (inventory.quantity <= inventory.minStock) {
-          inventory.status = 'Low Stock'
-        } else {
-          inventory.status = 'In Stock'
-        }
 
-        // Update lastRestocked
-        inventory.lastRestocked = new Date()
+    inventory.lastRestocked = new Date()
 
-        await inventory.save()
 
-        // Also update product stock
-        const product = await Product.findById(inventory.productId)
-        if (product) {
-          product.stock = inventory.quantity
-          await product.save()
-        }
+    // Update status
+    if (inventory.quantity === 0)
+      inventory.status = 'Out of Stock'
 
-        deductedItems.push({
-          barcode: inventory.barcode,
-          name: item.name,
-          quantity: quantity,
-          remainingQuantity: inventory.quantity,
-          status: inventory.status,
-        })
-      } catch (itemError) {
-        console.error('Error deducting item:', itemError)
-        errors.push({
-          product: item.name || item.barcode || item.id,
-          error: itemError.message,
-        })
-      }
+    else if (inventory.quantity <= inventory.minStock)
+      inventory.status = 'Low Stock'
+
+    else
+      inventory.status = 'In Stock'
+
+
+    await inventory.save()
+
+
+    // Update product stock
+    if (inventory.productId) {
+      await Product.findByIdAndUpdate(
+        inventory.productId,
+        { stock: inventory.quantity }
+      )
     }
+
+    await cacheService.clearInventoryCache()
 
     res.json({
       success: true,
-      message: 'Inventory deducted for bill completion',
-      deductedItems,
-      errors: errors.length > 0 ? errors : undefined,
+      data: inventory,
     })
+
   } catch (error) {
-    console.error('Error deducting bill inventory:', error)
-    res.status(500).json({ error: 'Failed to deduct inventory for bill' })
+
+    console.error(error)
+
+    res.status(500).json({
+      success: false,
+      error: 'Failed to update inventory',
+    })
+  }
+})
+
+
+
+/**
+ * ======================================
+ * DELETE SINGLE INVENTORY
+ * ======================================
+ */
+router.delete('/:id', async (req, res) => {
+  try {
+
+    const inventory = await Inventory.findById(req.params.id)
+
+    if (!inventory) {
+      return res.status(404).json({
+        success: false,
+        error: 'Inventory not found',
+      })
+    }
+
+    if (inventory.productId) {
+      await Product.findByIdAndUpdate(
+        inventory.productId,
+        { stock: 0 }
+      )
+    }
+
+    await Inventory.findByIdAndDelete(req.params.id)
+
+    await cacheService.clearInventoryCache()
+
+    res.json({
+      success: true,
+      message: 'Inventory deleted successfully',
+      deletedId: req.params.id,
+    })
+
+  } catch (error) {
+
+    console.error(error)
+
+    res.status(500).json({
+      success: false,
+      error: 'Failed to delete inventory',
+    })
+  }
+})
+
+
+
+/**
+ * ======================================
+ * DELETE ALL INVENTORY
+ * ======================================
+ */
+router.delete('/', async (req, res) => {
+  try {
+
+    const result = await Inventory.deleteMany({})
+
+    await Product.updateMany({}, { stock: 0 })
+
+    await cacheService.clearInventoryCache()
+
+    res.json({
+      success: true,
+      deletedCount: result.deletedCount,
+    })
+
+  } catch (error) {
+
+    console.error(error)
+
+    res.status(500).json({
+      success: false,
+      error: 'Failed to delete all inventory',
+    })
+  }
+})
+
+
+
+/**
+ * ======================================
+ * DELETE INVENTORY OLDER THAN X DAYS
+ * ======================================
+ */
+router.delete('/older-than/:days', async (req, res) => {
+  try {
+
+    const days = parseInt(req.params.days)
+
+    const cutoffDate = new Date()
+
+    cutoffDate.setDate(cutoffDate.getDate() - days)
+
+    const result = await Inventory.deleteMany({
+      createdAt: { $lt: cutoffDate },
+    })
+
+    await cacheService.clearInventoryCache()
+
+    res.json({
+      success: true,
+      deletedCount: result.deletedCount,
+    })
+
+  } catch (error) {
+
+    console.error(error)
+
+    res.status(500).json({
+      success: false,
+      error: 'Failed to delete old inventory',
+    })
+  }
+})
+
+
+
+/**
+ * ======================================
+ * DELETE INVENTORY BY WAREHOUSE
+ * ======================================
+ */
+router.delete('/warehouse/:warehouse', async (req, res) => {
+  try {
+
+    const result = await Inventory.deleteMany({
+      warehouse: req.params.warehouse,
+    })
+
+    await cacheService.clearInventoryCache()
+
+    res.json({
+      success: true,
+      deletedCount: result.deletedCount,
+    })
+
+  } catch (error) {
+
+    console.error(error)
+
+    res.status(500).json({
+      success: false,
+      error: 'Failed to delete warehouse inventory',
+    })
   }
 })
 

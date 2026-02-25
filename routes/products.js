@@ -29,12 +29,12 @@ router.get('/', async (req, res) => {
     }
 
     const products = await Product.find(query).limit(100)
-
     res.json({
       success: true,
       count: products.length,
       data: products,
     })
+    console.log(`✓ Fetched ${products.length} products from MongoDB`)
   } catch (error) {
     console.error('Error fetching products:', error)
     res.status(500).json({ error: 'Failed to fetch products' })
